@@ -1,0 +1,9 @@
+{
+  "name": "MommyGemini Care",
+  "description": "A compassionate care companion app designed for lifestyle and wellness tracking, featuring routine management, symptom journaling, and comforting AI interactions.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}
