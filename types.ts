@@ -5,6 +5,7 @@ export interface Task {
   type: 'hygiene' | 'food' | 'water' | 'meds' | 'comfort' | 'medical' | 'general';
   time?: string;
   timestamp?: string;
+  dayOfWeek?: 'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday' | 'Saturday';
 }
 
 export interface JournalEntry {
@@ -23,7 +24,13 @@ export interface Appointment {
   type: 'medical' | 'general';
 }
 
-export type ViewMode = 'phone' | 'walk' | 'comfort' | 'rules' | 'journal' | 'appts' | 'watch';
+export interface DiaperLogEntry {
+  id: number;
+  timestamp: string;
+  status: 'wet' | 'soiled' | 'mixed' | 'Changed'; // 'Changed' is a general type for the button
+}
+
+export type ViewMode = 'phone' | 'walk' | 'comfort' | 'rules' | 'journal' | 'appts' | 'watch' | 'diaperLog';
 
 export interface MommyMessageData {
   text: string;

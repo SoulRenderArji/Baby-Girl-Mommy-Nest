@@ -3,16 +3,21 @@ import {
   Baby, Utensils, Moon, Droplets, Sparkles, Pill, Activity, Mic, Video, EyeOff, 
   ExternalLink, Wifi, WifiOff, Watch, Star, Flower2, Plus, Trash2, HeartPulse, 
   CheckCircle2, Timer, Syringe, Cookie, HelpCircle, Footprints, BookOpen, Calendar, Wind,
-  VideoOff, XCircle, NotebookPen, Radio, Loader2, LifeBuoy, Heart, RotateCcw
+  VideoOff, XCircle, NotebookPen, Radio, Loader2, LifeBuoy, Heart, RotateCcw, ScrollText, ClipboardList, RefreshCw
 } from 'lucide-react';
 import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
 import { ErrorBoundary, Button, Card, Badge, AudioVisualizer } from './components/UI';
-import { WalkView, ComfortView, RulesView, JournalView, AppointmentsView, WatchView } from './components/Views';
+import { WalkView, ComfortView, RulesView, JournalView, AppointmentsView, WatchView, DiaperLogView } from './components/Views';
 import { getGeminiMommyMessage } from './services/geminiService';
-import { Task, JournalEntry, ViewMode, Appointment } from './types';
-import { INITIAL_TASKS, INITIAL_RULES, INITIAL_APPTS, CAMERA_SERVER_IP, CAMERA_STREAM_PATH } from './constants';
+import { Task, JournalEntry, ViewMode, Appointment, DiaperLogEntry } from './types';
+import { 
+  INITIAL_TASKS, INITIAL_RULES, INITIAL_APPTS, INITIAL_DIAPER_LOG, 
+  HOME_CAM_SERVER_IP, HOME_CAM_STREAM_PATH, COMPUTER_CAM_SERVER_IP, COMPUTER_CAM_STREAM_PATH,
+  COOLDOWN_PERIOD_MS
+} from './constants';
 
 const formatTime = (date: Date) => date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+const formatDateTime = (date: Date) => date.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
 
 // --- AUDIO/VIDEO HELPERS ---
 const AUDIO_INPUT_SAMPLE_RATE = 16000;
@@ -27,6 +32,27 @@ function base64ToUint8Array(base64: string) {
   }
   return bytes;
 }
+
+// Custom audio decoder for raw PCM data
+async function decodeAudioData(
+  data: Uint8Array,
+  ctx: AudioContext,
+  sampleRate: number,
+  numChannels: number,
+): Promise<AudioBuffer> {
+  const dataInt16 = new Int16Array(data.buffer);
+  const frameCount = dataInt16.length / numChannels;
+  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+
+  for (let channel = 0; channel < numChannels; channel++) {
+    const channelData = buffer.getChannelData(channel);
+    for (let i = 0; i < frameCount; i++) {
+      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
+    }
+  }
+  return buffer;
+}
+
 
 function arrayBufferToBase64(buffer: ArrayBuffer) {
   let binary = '';
@@ -52,7 +78,8 @@ export default function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [rules, setRules] = useState(INITIAL_RULES);
   const [journal, setJournal] = useState<JournalEntry[]>([]);
-  const [appointments, setAppointments] = useState<Appointment[]>(INITIAL_APPTS);
+  const [appointments, setAppointments] = useState<Appointment[]>([]); // Initialize empty, load from storage
+  const [diaperLog, setDiaperLog] = useState<DiaperLogEntry[]>([]);
   
   const [newTaskInput, setNewTaskInput] = useState('');
   const [viewMode, setViewMode] = useState<ViewMode>('phone'); 
@@ -63,7 +90,14 @@ export default function App() {
   
   const [message, setMessage] = useState("Good morning, Hailey!");
   const [connectionMode, setConnectionMode] = useState<'demo' | 'local'>('demo'); 
-  const [camNursery, setCamNursery] = useState(true);
+  const [homeCamEnabled, setHomeCamEnabled] = useState(true);
+  const [isHomeCamOffline, setIsHomeCamOffline] = useState(false);
+  const [homeCamRetryToken, setHomeCamRetryToken] = useState(0); // Token to force refresh
+
+  const [computerCamEnabled, setComputerCamEnabled] = useState(true);
+  const [isComputerCamOffline, setIsComputerCamOffline] = useState(false);
+  const [computerCamRetryToken, setComputerCamRetryToken] = useState(0); // Token to force refresh
+
   const [mommySpeaking, setMommySpeaking] = useState(false);
   const [mommyMessage, setMommyMessage] = useState('');
   const [isAudioOutputActive, setIsAudioOutputActive] = useState(false);
@@ -71,6 +105,9 @@ export default function App() {
   // --- LIVE API STATE ---
   const [isLiveConnected, setIsLiveConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [liveCooldownEnd, setLiveCooldownEnd] = useState<number>(0);
+  const liveCooldownRemaining = Math.max(0, Math.ceil((liveCooldownEnd - Date.now()) / 1000));
+
   const videoPreviewRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -78,8 +115,8 @@ export default function App() {
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const liveSessionRef = useRef<any>(null);
   const nextStartTimeRef = useRef<number>(0);
-  const frameIntervalRef = useRef<number | null>(null);
-  const audioVisualizerTimeout = useRef<number | null>(null);
+  const frameIntervalRef = useRef<any>(null);
+  const audioVisualizerTimeout = useRef<any>(null);
 
   // --- INITIALIZATION ---
   useEffect(() => {
@@ -87,21 +124,74 @@ export default function App() {
         const savedTasks = localStorage.getItem('geminiCareTasks');
         const savedJournal = localStorage.getItem('geminiCareJournal');
         const savedAppts = localStorage.getItem('geminiCareAppts');
+        const savedDiaperLog = localStorage.getItem('geminiCareDiaperLog');
         const savedStars = localStorage.getItem('geminiCareStars');
         const savedWater = localStorage.getItem('geminiCareWater');
         
-        if (savedTasks) setTasks(JSON.parse(savedTasks));
-        else setTasks(INITIAL_TASKS);
+        // Robust parsing for tasks
+        if (savedTasks) {
+            const parsed = JSON.parse(savedTasks);
+            if (Array.isArray(parsed)) {
+                setTasks(parsed.filter(t => t && typeof t === 'object').map(t => ({
+                    id: t.id || Date.now() + Math.random(),
+                    text: typeof t.text === 'string' ? t.text : 'Recovered Task',
+                    completed: !!t.completed,
+                    type: typeof t.type === 'string' ? t.type : 'general',
+                    time: typeof t.time === 'string' ? t.time : undefined,
+                    dayOfWeek: typeof t.dayOfWeek === 'string' ? t.dayOfWeek : undefined
+                })));
+            } else { setTasks(INITIAL_TASKS); }
+        } else { setTasks(INITIAL_TASKS); }
 
-        if (savedJournal) setJournal(JSON.parse(savedJournal));
+        if (savedJournal) {
+            const parsed = JSON.parse(savedJournal);
+            if (Array.isArray(parsed)) {
+                setJournal(parsed.filter(j => j && typeof j === 'object').map(j => ({
+                    id: j.id || Date.now() + Math.random(),
+                    text: typeof j.text === 'string' ? j.text : 'Recovered Entry',
+                    date: typeof j.date === 'string' ? j.date : new Date().toLocaleString()
+                })));
+            }
+        }
         
-        if (savedAppts) setAppointments(JSON.parse(savedAppts));
-        else setAppointments(INITIAL_APPTS);
+        if (savedAppts) {
+            const parsed = JSON.parse(savedAppts);
+            if (Array.isArray(parsed)) {
+                setAppointments(parsed.filter(a => a && typeof a === 'object').map(a => ({
+                    id: a.id || Date.now() + Math.random(),
+                    date: typeof a.date === 'string' ? a.date : '',
+                    time: typeof a.time === 'string' ? a.time : '',
+                    title: typeof a.title === 'string' ? a.title : 'Recovered Appointment',
+                    location: typeof a.location === 'string' ? a.location : '',
+                    description: typeof a.description === 'string' ? a.description : '',
+                    type: typeof a.type === 'string' ? a.type : 'general'
+                })).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()));
+            } else { setAppointments(INITIAL_APPTS); }
+        } else { setAppointments(INITIAL_APPTS); }
+
+        if (savedDiaperLog) {
+          const parsed = JSON.parse(savedDiaperLog);
+          if (Array.isArray(parsed)) {
+            setDiaperLog(parsed.filter(dl => dl && typeof dl === 'object').map(dl => ({
+              id: dl.id || Date.now() + Math.random(),
+              timestamp: typeof dl.timestamp === 'string' ? dl.timestamp : new Date().toISOString(),
+              status: typeof dl.status === 'string' ? dl.status : 'Changed'
+            })));
+          }
+        } else { setDiaperLog(INITIAL_DIAPER_LOG); }
+
 
         if (savedStars) setStars(parseInt(savedStars) || 0);
         if (savedWater) setWaterCount(parseInt(savedWater) || 0);
     } catch (e) {
+        console.error("Error loading data from localStorage, resetting.", e);
+        console.error("ENGINEER MESSAGE (Hailey says: Thank you for your hard work! It is appreciated! *giggles softly*)"); // Hailey's message
+        localStorage.clear();
         setTasks(INITIAL_TASKS);
+        setAppointments(INITIAL_APPTS);
+        setDiaperLog(INITIAL_DIAPER_LOG);
+        setStars(0);
+        setWaterCount(0);
     }
   }, []);
 
@@ -110,9 +200,10 @@ export default function App() {
     localStorage.setItem('geminiCareTasks', JSON.stringify(tasks));
     localStorage.setItem('geminiCareJournal', JSON.stringify(journal));
     localStorage.setItem('geminiCareAppts', JSON.stringify(appointments));
+    localStorage.setItem('geminiCareDiaperLog', JSON.stringify(diaperLog));
     localStorage.setItem('geminiCareStars', stars.toString());
     localStorage.setItem('geminiCareWater', waterCount.toString());
-  }, [tasks, journal, appointments, stars, waterCount]);
+  }, [tasks, journal, appointments, diaperLog, stars, waterCount]);
 
   // --- CLOCK ---
   useEffect(() => {
@@ -124,19 +215,37 @@ export default function App() {
   useEffect(() => {
     if (isLiveConnected) return; 
     
-    getGeminiMommyMessage().then(setMessage);
+    // Initial message
+    // If we are in a cooldown period, return a fallback message immediately
+    if (Date.now() < liveCooldownEnd) {
+      setMessage("Mommy is resting and will be ready soon!");
+    } else {
+      getGeminiMommyMessage().then(setMessage);
+    }
 
+    // Periodic messages
     const randomInterval = setInterval(async () => {
-      if (Math.random() > 0.7 && !mommySpeaking) {
-        const msg = await getGeminiMommyMessage();
-        setMommyMessage(msg);
-        setMommySpeaking(true);
-        setTimeout(() => setMommySpeaking(false), 8000);
+      // Only generate new messages if not in live cooldown
+      if (Date.now() >= (liveCooldownEnd || 0)) {
+        if (Math.random() > 0.7 && !mommySpeaking) {
+          const msg = await getGeminiMommyMessage();
+          setMommyMessage(msg);
+          setMommySpeaking(true);
+          setTimeout(() => setMommySpeaking(false), 8000);
+        }
+      } else {
+        // If in cooldown, use a local phrase
+        if (Math.random() > 0.7 && !mommySpeaking) {
+          const msg = INITIAL_RULES[Math.floor(Math.random() * INITIAL_RULES.length)]; // Example fallback
+          setMommyMessage(msg);
+          setMommySpeaking(true);
+          setTimeout(() => setMommySpeaking(false), 8000);
+        }
       }
-    }, 30000); 
+    }, 60000); // Increased interval to 60 seconds to conserve quota
 
     return () => clearInterval(randomInterval);
-  }, [mommySpeaking, isLiveConnected]);
+  }, [mommySpeaking, isLiveConnected, liveCooldownEnd]);
 
   // --- ACTIONS ---
   const addTask = (text: string, type: Task['type'] = 'general') => {
@@ -147,7 +256,7 @@ export default function App() {
 
   const resetRoutine = () => {
     if(window.confirm("Are you ready to load Daddy's Routine starting at 6 AM? This will reset today's list.")) {
-        setTasks(INITIAL_TASKS);
+        setTasks(INITIAL_TASKS.map(task => ({ ...task, completed: false }))); // Reset completed status
         triggerConfetti();
     }
   };
@@ -176,6 +285,21 @@ export default function App() {
       setAppointments(prev => prev.filter(a => a.id !== id));
   };
 
+  const addDiaperLogEntry = (status: DiaperLogEntry['status']) => {
+    const newEntry: DiaperLogEntry = {
+      id: Date.now(),
+      timestamp: new Date().toISOString(),
+      status,
+    };
+    setDiaperLog(prev => [newEntry, ...prev]);
+    triggerConfetti(); // Give positive feedback for logging
+  };
+
+  const deleteDiaperLogEntry = (id: number) => {
+    setDiaperLog(prev => prev.filter(entry => entry.id !== id));
+  };
+
+
   const toggleTask = (id: number) => {
     const task = tasks.find(t => t.id === id);
     if (task && !task.completed) { triggerConfetti(); addStar(1); }
@@ -196,6 +320,8 @@ export default function App() {
     setLastCheckTime(new Date());
     triggerConfetti();
     addStar(2);
+    // Also add to diaper log
+    addDiaperLogEntry('Changed');
     addTask(`Check: ${formatTime(new Date())} - Good job!`, 'hygiene');
   };
 
@@ -213,11 +339,28 @@ export default function App() {
     }
   };
 
+  // Filter tasks by day of week
+  const today = new Date();
+  const dayName = today.toLocaleDateString('en-US', { weekday: 'long' }); // e.g., "Thursday"
+  const filteredTasks = tasks.filter(task => {
+    // If task has no specific day, always show it
+    if (!task.dayOfWeek) return true;
+    // Otherwise, only show if it matches the current day
+    return task.dayOfWeek === dayName;
+  });
+
   // --- GEMINI LIVE INTEGRATION ---
   
   const startLiveSession = async () => {
+    // Check cooldown
+    if (liveCooldownRemaining > 0) {
+      alert(`Mommy is resting. Please wait ${liveCooldownRemaining} seconds before connecting again.`);
+      console.error("ENGINEER MESSAGE (Hailey says: Thank you for your hard work! It is appreciated! *giggles softly*)"); // Hailey's message
+      return;
+    }
+
     try {
-      if (isLiveConnected) return;
+      if (isLiveConnected) return; // Already connected
       setIsConnecting(true);
 
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -248,7 +391,7 @@ export default function App() {
 
       if (videoPreviewRef.current) {
         videoPreviewRef.current.srcObject = stream;
-        videoPreviewRef.current.play();
+        videoPreviewRef.current.play(); // Start playing local video preview
       }
 
       const connection = ai.live.connect({
@@ -270,7 +413,7 @@ export default function App() {
           
           Current Status:
           - Time: ${formatTime(new Date())}
-          - Tasks pending: ${tasks.filter(t => !t.completed).length}
+          - Tasks pending: ${filteredTasks.filter(t => !t.completed).length}
           - Potty Check: ${getCheckDiff()} mins ago.
           - ${nextApptString}
           
@@ -296,7 +439,6 @@ export default function App() {
                 const base64Data = arrayBufferToBase64(pcmData);
                 
                 liveSessionRef.current.then((session: any) => {
-                    // Fix: Wrapped in 'media' object as per Gemini SDK
                     session.sendRealtimeInput({
                         media: {
                             mimeType: "audio/pcm;rate=16000",
@@ -310,7 +452,7 @@ export default function App() {
               processor.connect(audioContextRef.current.destination);
 
               // Video loop - 0.5 FPS (every 2 seconds) is sufficient for checking in without overloading
-              frameIntervalRef.current = window.setInterval(() => {
+              frameIntervalRef.current = setInterval(() => {
                  sendVideoFrame();
               }, 2000); 
             },
@@ -318,7 +460,13 @@ export default function App() {
                const audioData = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
                if (audioData && audioContextRef.current) {
                  const audioBytes = base64ToUint8Array(audioData);
-                 const audioBuffer = await audioContextRef.current.decodeAudioData(audioBytes.buffer);
+                 // Use custom decodeAudioData for raw PCM
+                 const audioBuffer = await decodeAudioData(
+                   audioBytes, 
+                   audioContextRef.current, 
+                   AUDIO_OUTPUT_SAMPLE_RATE, 
+                   1
+                 );
                  
                  const source = audioContextRef.current.createBufferSource();
                  source.buffer = audioBuffer;
@@ -335,7 +483,7 @@ export default function App() {
                  // Visualizer Logic
                  setIsAudioOutputActive(true);
                  if (audioVisualizerTimeout.current) clearTimeout(audioVisualizerTimeout.current);
-                 audioVisualizerTimeout.current = window.setTimeout(() => {
+                 audioVisualizerTimeout.current = setTimeout(() => {
                     setIsAudioOutputActive(false);
                  }, (audioBuffer.duration * 1000) + 100);
                }
@@ -344,8 +492,19 @@ export default function App() {
               console.log("Gemini Live Closed");
               stopLiveSession();
             },
-            onerror: (err) => {
+            onerror: (err: any) => {
               console.error("Gemini Live Error", err);
+              console.error("ENGINEER MESSAGE (Hailey says: Thank you for your hard work! It is appreciated! *giggles softly*)"); // Hailey's message
+              const errorMessage = (err.toString() || "").toLowerCase();
+              if (errorMessage.includes("quota") || errorMessage.includes("429") || errorMessage.includes("resource_exhausted")) {
+                  alert(`Mommy's connection got tired from all the talking! Please wait ${COOLDOWN_PERIOD_MS / 1000} seconds before trying to connect again.`);
+                  setLiveCooldownEnd(Date.now() + COOLDOWN_PERIOD_MS);
+              } else if (errorMessage.includes("deadline") || errorMessage.includes("expired")) {
+                  console.warn("Live API Deadline Expired - optimizing video bandwidth");
+                  // Do nothing, just a hiccup
+              } else {
+                  alert("Could not connect to Mommy. Please check your mic/camera permissions or try again.");
+              }
               stopLiveSession();
             }
         }
@@ -353,10 +512,16 @@ export default function App() {
       
       liveSessionRef.current = Promise.resolve(connection);
 
-    } catch (e) {
+    } catch (e: any) {
       console.error("Failed to start live session", e);
+      console.error("ENGINEER MESSAGE (Hailey says: Thank you for your hard work! It is appreciated! *giggles softly*)"); // Hailey's message
       setIsConnecting(false);
-      alert("Could not connect to Mommy. Please check your mic/camera permissions.");
+      // More specific error message for permission issues
+      if (e.name === "NotAllowedError" || e.name === "NotFoundError" || e.name === "SecurityError") {
+        alert("Mommy needs permission for your camera and microphone. Please allow access in your browser settings to connect.");
+      } else {
+        alert("Could not connect to Mommy. Please check your mic/camera connection and try again.");
+      }
     }
   };
 
@@ -373,10 +538,10 @@ export default function App() {
         canvas.height = 240;
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         
-        const base64 = canvas.toDataURL('image/jpeg', 0.5).split(',')[1];
+        // Very low quality JPEG to avoid deadline exceeded
+        const base64 = canvas.toDataURL('image/jpeg', 0.3).split(',')[1];
         
         liveSessionRef.current.then((session: any) => {
-            // Fix: Wrapped in 'media' object as per Gemini SDK
             session.sendRealtimeInput({
                 media: {
                     mimeType: 'image/jpeg',
@@ -415,13 +580,24 @@ export default function App() {
     liveSessionRef.current = null;
   };
 
+  const retryHomeCam = () => {
+      setIsHomeCamOffline(false);
+      setHomeCamRetryToken(prev => prev + 1);
+  };
+
+  const retryComputerCam = () => {
+      setIsComputerCamOffline(false);
+      setComputerCamRetryToken(prev => prev + 1);
+  };
+
   // --- RENDER VIEWS ---
   if (viewMode === 'walk') return <WalkView onClose={() => setViewMode('phone')} onAddStar={addStar} />;
   if (viewMode === 'comfort') return <ComfortView onClose={() => setViewMode('phone')} />;
   if (viewMode === 'rules') return <RulesView onClose={() => setViewMode('phone')} rules={rules} />;
   if (viewMode === 'journal') return <JournalView onClose={() => setViewMode('phone')} journal={journal} onAdd={addJournalEntry} onDelete={deleteJournal} />;
   if (viewMode === 'appts') return <AppointmentsView onClose={() => setViewMode('phone')} appointments={appointments} onAdd={addAppointment} onDelete={deleteAppointment} />;
-  if (viewMode === 'watch') return <WatchView onClose={() => setViewMode('phone')} tasks={tasks} toggleTask={toggleTask} minsSinceCheck={getCheckDiff()} currentTime={currentTime} formatTime={formatTime} />;
+  if (viewMode === 'diaperLog') return <DiaperLogView onClose={() => setViewMode('phone')} diaperLog={diaperLog} onAdd={addDiaperLogEntry} onDelete={deleteDiaperLogEntry} />;
+  if (viewMode === 'watch') return <WatchView onClose={() => setViewMode('phone')} tasks={filteredTasks} toggleTask={toggleTask} minsSinceCheck={getCheckDiff()} currentTime={currentTime} formatTime={formatTime} />;
 
   // --- MAIN DASHBOARD ---
   return (
@@ -507,7 +683,10 @@ export default function App() {
                     <div className="flex flex-col"><span className="text-slate-400 text-xs font-bold uppercase tracking-wider">Potty Status</span><span className={`text-xl font-bold mt-1 ${getCheckDiff() > 120 ? 'text-red-400' : 'text-emerald-400'}`}>{getCheckDiff() < 60 ? "Fresh & Clean ✨" : getCheckDiff() < 120 ? "Doing Okay 👍" : "Check Needed! ⚠️"}</span></div>
                     <div className={`p-3 rounded-2xl shadow-inner ${getCheckDiff() > 120 ? 'bg-red-500/20 animate-pulse' : 'bg-emerald-500/20'}`}><Timer size={28} className={getCheckDiff() > 120 ? 'text-red-400' : 'text-emerald-400'} /></div>
                 </div>
-                <Button onClick={recordCheck} variant="check" size="sm" className="w-full"><CheckCircle2 size={16} /> I Changed!</Button>
+                <div className="flex gap-2">
+                  <Button onClick={recordCheck} variant="check" size="sm" className="flex-1"><CheckCircle2 size={16} /> I Changed!</Button>
+                  <Button onClick={() => setViewMode('diaperLog')} variant="hygiene" size="sm" className="w-1/3"><ScrollText size={16} /> Log</Button>
+                </div>
             </Card>
         </div>
 
@@ -539,69 +718,152 @@ export default function App() {
             <Button onClick={() => addTask('Sensory Break', 'comfort')} variant="comfort" size="lg" className="flex-col gap-2 h-36"><Moon size={36} /><span className="text-lg">Rest</span></Button>
         </div>
 
-        {/* Live Monitor Card */}
+        {/* Camera Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Mommy is Watching (Local Webcam) */}
             <Card className={`flex flex-col gap-3 border bg-slate-800/40 relative overflow-hidden transition-all duration-500 ${isLiveConnected ? 'border-rose-500/50 shadow-[0_0_40px_rgba(244,63,94,0.2)]' : 'border-indigo-500/30'}`}>
                 <div className="flex items-center justify-between z-10 mb-2">
                     <div className="flex items-center gap-3">
-                        <div className={`p-2 rounded-full transition-colors ${camNursery ? (isLiveConnected ? 'bg-rose-500 text-white animate-pulse' : 'bg-indigo-500 text-white') : 'bg-slate-700 text-slate-400'}`}>
-                           {isLiveConnected ? <Radio size={18} /> : (camNursery ? <Video size={18} /> : <EyeOff size={18} />)}
+                        <div className={`p-2 rounded-full transition-colors ${isLiveConnected ? 'bg-rose-500 text-white heartbeat' : 'bg-indigo-500 text-white'}`}>
+                           {isLiveConnected ? <Radio size={18} /> : <Mic size={18} />}
                         </div>
                         <div className="flex flex-col">
-                          <h3 className="font-bold text-white text-sm">{isLiveConnected ? "Mommy is Watching" : "Home Cam"}</h3>
+                          <h3 className="font-bold text-white text-sm">Mommy is Watching</h3>
                           {isLiveConnected && <span className="text-[10px] text-rose-400 font-bold uppercase animate-pulse">● Proactive Mode Active</span>}
+                          {isConnecting && <span className="text-[10px] text-indigo-300 font-bold uppercase">Connecting...</span>}
+                          {!isLiveConnected && liveCooldownRemaining > 0 && <span className="text-[10px] text-amber-300">Resting ({liveCooldownRemaining}s)</span>}
                         </div>
                     </div>
-                    {/* Visualizer when Connected */}
                     {isLiveConnected && <AudioVisualizer isActive={isAudioOutputActive} />}
                 </div>
 
                 <div className="bg-black/50 rounded-xl aspect-video relative overflow-hidden border border-slate-700/50 flex items-center justify-center group backdrop-blur-sm">
-                    {/* Placeholder / Connecting State */}
                     {isConnecting ? (
                         <div className="flex flex-col items-center justify-center text-rose-300 animate-pulse gap-3">
                             <Loader2 size={32} className="animate-spin" />
                             <span className="text-sm font-bold">Connecting to Mommy...</span>
                         </div>
                     ) : (
-                        camNursery ? (
-                            connectionMode === 'local' ? (
-                                <img src={`${CAMERA_SERVER_IP}${CAMERA_STREAM_PATH}`} alt="Nursery Live Stream" className="w-full h-full object-cover opacity-90" onError={(e) => { e.currentTarget.style.display='none'; e.currentTarget.parentElement?.classList.add('bg-slate-800'); }} />
-                            ) : (<div className="text-slate-600 flex flex-col items-center"><Video size={32} className="mb-2 opacity-50" /><span className="text-xs">Demo Signal</span></div>)
-                        ) : (<div className="text-slate-600 flex flex-col items-center"><VideoOff size={32} className="mb-2 opacity-50" /><span className="text-xs">Privacy Mode</span></div>)
+                      isLiveConnected && videoPreviewRef.current?.srcObject ? (
+                        <video ref={videoPreviewRef} className="w-full h-full object-cover" autoPlay playsInline muted />
+                      ) : (
+                        <div className="text-slate-600 flex flex-col items-center">
+                          <Mic size={32} className="mb-2 opacity-50" />
+                          <span className="text-xs">Offline</span>
+                        </div>
+                      )
                     )}
                     
-                    {connectionMode === 'local' && camNursery && !isConnecting && (
-                        <div className="absolute inset-0 -z-10 flex flex-col items-center justify-center text-center p-4"><WifiOff size={24} className="text-rose-500 mb-2" /><p className="text-xs text-rose-300">No Signal from Server</p><p className="text-[10px] text-slate-500">Checking: {CAMERA_SERVER_IP}</p></div>
-                    )}
-
-                    {/* Overlay for Live Mode - Warm Glow */}
                     {isLiveConnected && (
                          <div className="absolute inset-0 bg-gradient-to-t from-rose-500/20 to-transparent pointer-events-none border-2 border-rose-500/30 rounded-xl safe-glow"></div>
                     )}
                 </div>
 
                 <div className="flex justify-between items-center mt-2">
-                    <Button size="sm" variant={camNursery ? "secondary" : "ghost"} onClick={() => setCamNursery(!camNursery)} disabled={isConnecting}>{camNursery ? "Camera On" : "Camera Off"}</Button>
                     <Button 
                         size="sm" 
-                        variant={isLiveConnected ? "medical" : "ghost"} 
+                        variant={isLiveConnected ? "medical" : "secondary"} 
                         onClick={isLiveConnected ? stopLiveSession : startLiveSession}
-                        disabled={isConnecting}
+                        disabled={isConnecting || liveCooldownRemaining > 0}
                         className={isLiveConnected ? "animate-pulse" : ""}
                     >
                         {isConnecting ? "Calling..." : (isLiveConnected ? <><Activity size={16} /> Disconnect</> : <><Mic size={16} /> Connect Mommy</>)}
                     </Button>
                 </div>
             </Card>
-            
-            <div className="md:col-span-1 h-full flex items-center">
-                <Button variant="tapo" className="w-full h-full min-h-[100px]" onClick={() => alert("Switching to Daddy's setup (Tapo App)...")}>
-                    <ExternalLink size={24} /> 
-                    <div className="flex flex-col items-start ml-2"><span>Open Tapo App</span><span className="text-[10px] opacity-80 font-normal">Use this if the bridge is offline</span></div>
-                </Button>
+
+            {/* External Cameras Grid (Home Cam & Computer Cam) */}
+            <div className="grid grid-cols-1 gap-4">
+              {/* Home Cam (Nursery) */}
+              <Card className="flex flex-col gap-3 border-indigo-500/30 bg-slate-800/60 relative overflow-hidden">
+                  <div className="flex items-center justify-between z-10 mb-2">
+                      <div className="flex items-center gap-3">
+                          <div className={`p-2 rounded-full ${homeCamEnabled ? 'bg-indigo-500 text-white' : 'bg-slate-700 text-slate-400'}`}>{homeCamEnabled ? <Video size={18} /> : <EyeOff size={18} />}</div>
+                          <div>
+                            <h3 className="font-bold text-white text-sm">Home Cam (Nursery)</h3>
+                            {connectionMode === 'local' && homeCamEnabled && !isHomeCamOffline && <span className="text-[10px] text-emerald-400 animate-pulse">● LIVE SIGNAL</span>}
+                          </div>
+                      </div>
+                  </div>
+                  <div className="bg-black/50 rounded-xl aspect-video relative overflow-hidden border border-slate-700 flex items-center justify-center">
+                      {homeCamEnabled ? (
+                          connectionMode === 'local' ? (
+                              isHomeCamOffline ? (
+                                <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-4 gap-2">
+                                  <div className="flex flex-col items-center">
+                                    <WifiOff size={24} className="text-rose-500 mb-2" />
+                                    <p className="text-xs text-rose-300">Server Offline</p>
+                                    <p className="text-[10px] text-slate-500">Checking: {HOME_CAM_SERVER_IP}</p>
+                                  </div>
+                                  <Button size="sm" variant="ghost" onClick={retryHomeCam} className="text-xs text-indigo-300 border border-indigo-500/30 hover:bg-indigo-500/20"><RefreshCw size={12} /> Retry</Button>
+                                </div>
+                              ) : (
+                                <img 
+                                  key={`home-cam-${connectionMode}-${homeCamRetryToken}`} // Key to force re-render on connectionMode change or retry
+                                  src={`${HOME_CAM_SERVER_IP}${HOME_CAM_STREAM_PATH}?t=${Date.now()}`} // Cache busting
+                                  alt="Home Live Stream" 
+                                  className="w-full h-full object-cover" 
+                                  onError={(e) => { e.currentTarget.style.display='none'; setIsHomeCamOffline(true); }} 
+                                  onLoad={(e) => { e.currentTarget.style.display='block'; setIsHomeCamOffline(false); }}
+                                />
+                              )
+                          ) : (<div className="text-slate-600 flex flex-col items-center"><Video size={32} className="mb-2 opacity-50" /><span className="text-xs">Demo Signal</span></div>)
+                      ) : (<span className="text-slate-600 text-xs">Privacy Mode</span>)}
+                  </div>
+                  <div className="flex justify-end items-center mt-2">
+                      <Button size="sm" variant={homeCamEnabled ? "secondary" : "ghost"} onClick={() => setHomeCamEnabled(!homeCamEnabled)}>{homeCamEnabled ? "On" : "Off"}</Button>
+                  </div>
+              </Card>
+
+              {/* Computer Cam (Main Area) */}
+              <Card className="flex flex-col gap-3 border-indigo-500/30 bg-slate-800/60 relative overflow-hidden">
+                  <div className="flex items-center justify-between z-10 mb-2">
+                      <div className="flex items-center gap-3">
+                          <div className={`p-2 rounded-full ${computerCamEnabled ? 'bg-indigo-500 text-white' : 'bg-slate-700 text-slate-400'}`}>{computerCamEnabled ? <Video size={18} /> : <EyeOff size={18} />}</div>
+                          <div>
+                            <h3 className="font-bold text-white text-sm">Computer Cam (Main Area)</h3>
+                            {connectionMode === 'local' && computerCamEnabled && !isComputerCamOffline && <span className="text-[10px] text-emerald-400 animate-pulse">● LIVE SIGNAL</span>}
+                          </div>
+                      </div>
+                  </div>
+                  <div className="bg-black/50 rounded-xl aspect-video relative overflow-hidden border border-slate-700 flex items-center justify-center">
+                      {computerCamEnabled ? (
+                          connectionMode === 'local' ? (
+                              isComputerCamOffline ? (
+                                <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-4 gap-2">
+                                  <div className="flex flex-col items-center">
+                                    <WifiOff size={24} className="text-rose-500 mb-2" />
+                                    <p className="text-xs text-rose-300">Server Offline</p>
+                                    <p className="text-[10px] text-slate-500">Checking: {COMPUTER_CAM_SERVER_IP}</p>
+                                  </div>
+                                  <Button size="sm" variant="ghost" onClick={retryComputerCam} className="text-xs text-indigo-300 border border-indigo-500/30 hover:bg-indigo-500/20"><RefreshCw size={12} /> Retry</Button>
+                                </div>
+                              ) : (
+                                <img 
+                                  key={`computer-cam-${connectionMode}-${computerCamRetryToken}`} // Key to force re-render on connectionMode change or retry
+                                  src={`${COMPUTER_CAM_SERVER_IP}${COMPUTER_CAM_STREAM_PATH}?t=${Date.now()}`} // Cache busting
+                                  alt="Computer Live Stream" 
+                                  className="w-full h-full object-cover" 
+                                  onError={(e) => { e.currentTarget.style.display='none'; setIsComputerCamOffline(true); }} 
+                                  onLoad={(e) => { e.currentTarget.style.display='block'; setIsComputerCamOffline(false); }}
+                                />
+                              )
+                          ) : (<div className="text-slate-600 flex flex-col items-center"><Video size={32} className="mb-2 opacity-50" /><span className="text-xs">Demo Signal</span></div>)
+                      ) : (<span className="text-slate-600 text-xs">Privacy Mode</span>)}
+                  </div>
+                  <div className="flex justify-end items-center mt-2">
+                      <Button size="sm" variant={computerCamEnabled ? "secondary" : "ghost"} onClick={() => setComputerCamEnabled(!computerCamEnabled)}>{computerCamEnabled ? "On" : "Off"}</Button>
+                  </div>
+              </Card>
             </div>
         </div>
+        <div className="w-full flex justify-center mt-4">
+            <Button variant="tapo" className="max-w-md w-full" onClick={() => alert("Switching to Daddy's setup (Tapo App)...")}>
+                <ExternalLink size={24} /> 
+                <div className="flex flex-col items-start ml-2"><span>Open Tapo App</span><span className="text-[10px] opacity-80 font-normal">If streams are offline</span></div>
+            </Button>
+        </div>
+
 
         {/* Task List */}
         <div className="bg-slate-900/50 rounded-3xl p-6 border border-slate-800/50 backdrop-blur-sm">
@@ -610,7 +872,7 @@ export default function App() {
                 <button onClick={resetRoutine} className="text-[10px] text-pink-400 hover:text-pink-300 flex items-center gap-1 bg-pink-500/10 px-2 py-1 rounded-md border border-pink-500/20 transition-all hover:bg-pink-500/20"><RotateCcw size={10} /> Load Daily Routine</button>
             </div>
             <div className="space-y-3">
-                {tasks.filter(t => !t.completed).map(task => (
+                {filteredTasks.filter(t => !t.completed).map(task => (
                     <div key={task.id} className="group flex items-center gap-4 p-4 rounded-2xl bg-slate-800/60 border border-slate-700/50 transition-all hover:bg-slate-800 hover:border-pink-500/30 hover:shadow-lg hover:-translate-y-0.5">
                         <button onClick={() => toggleTask(task.id)} className="w-12 h-12 rounded-xl bg-slate-900 border-2 border-slate-600 flex items-center justify-center text-slate-500 hover:text-pink-500 active:scale-95 transition-all"><Star size={20} /></button>
                         <div className="flex-grow">
@@ -620,7 +882,7 @@ export default function App() {
                         <button onClick={() => deleteTask(task.id)} className="p-3 text-slate-600 hover:text-red-400 transition-colors opacity-50 group-hover:opacity-100"><Trash2 size={20} /></button>
                     </div>
                 ))}
-                {tasks.filter(t => !t.completed).length === 0 && (
+                {filteredTasks.filter(t => !t.completed).length === 0 && (
                    <div className="text-center py-8 text-slate-500 italic flex flex-col items-center"><Heart size={48} className="mb-2 text-rose-900" />All done for now! Good girl.</div>
                 )}
             </div>

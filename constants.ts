@@ -1,7 +1,15 @@
-import { Task, Appointment } from './types';
+import { Task, Appointment, DiaperLogEntry } from './types';
 
-export const CAMERA_SERVER_IP = "http://192.168.8.170:5000";
-export const CAMERA_STREAM_PATH = "/video_feed";
+// Updated Camera IPs for clarity and multiple feeds
+// WE ARE USING DIRECT PORTS (5000/5001) TO AVOID APACHE CONFIGURATION
+export const HOME_CAM_SERVER_IP = "http://192.168.8.170:5000"; 
+export const HOME_CAM_STREAM_PATH = "/video_feed";
+
+export const COMPUTER_CAM_SERVER_IP = "http://192.168.8.170:5001";
+export const COMPUTER_CAM_STREAM_PATH = "/video_feed";
+
+// Cooldown period for API calls to prevent quota exhaustion (e.g., 5 minutes)
+export const COOLDOWN_PERIOD_MS = 5 * 60 * 1000; 
 
 export const INITIAL_TASKS: Task[] = [
   // MORNING BLOCK
@@ -16,7 +24,7 @@ export const INITIAL_TASKS: Task[] = [
   { id: 7, text: 'Full Glam: Blowdry, Style Hair, Makeup, Get Dressed', completed: false, type: 'comfort', time: '07:45' },
   
   // ACTIVITY BLOCK
-  { id: 8, text: 'Sunday Check: Estradiol Injection (0.15ml) today?', completed: false, type: 'medical', time: '09:00' },
+  { id: 8, text: 'Sunday Check: Estradiol Injection (0.15ml)', completed: false, type: 'medical', time: '09:00', dayOfWeek: 'Sunday' },
   { id: 9, text: 'Dishes & Light Tidy Up (Keep Daddy happy)', completed: false, type: 'general', time: '09:30' },
   { id: 10, text: 'Activity Goal: Walk or Exercise', completed: false, type: 'general', time: '10:30' },
   
@@ -49,6 +57,8 @@ export const INITIAL_APPTS: Appointment[] = [
   { id: 2, date: 'Feb 4, 2026', time: '10:00 AM', title: 'ALM Labs (Fasting Required)', location: 'Audie L. Murphy', description: 'Fasting Labs for Dr. Koreshi', type: 'medical' },
   { id: 3, date: 'Feb 11, 2026', time: '1:15 PM', title: 'Primary Care (Dr. Koreshi)', location: 'Shavano Park', description: 'Regular follow up', type: 'medical' }
 ];
+
+export const INITIAL_DIAPER_LOG: DiaperLogEntry[] = [];
 
 export const MOMMY_PHRASES = [
   "I'm right here watching over you, Hailey.",

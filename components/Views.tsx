@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
 import { 
   Footprints, ShieldCheck, Volume2, VolumeX, XCircle, CheckCircle2, Wind, BookOpen, Lock, 
-  NotebookPen, Trash2, Save, Calendar, CalendarPlus, Clock, Smartphone, Heart, Star, MapPin, Plus
+  NotebookPen, Trash2, Save, Calendar, CalendarPlus, Clock, Smartphone, Heart, Star, MapPin, Plus, ScrollText, ClipboardList
 } from 'lucide-react';
 import { Button, Card, Badge } from './UI';
-import { Task, JournalEntry, Appointment } from '../types';
+import { Task, JournalEntry, Appointment, DiaperLogEntry } from '../types';
 
 // --- HELPER FUNCTIONS ---
 const speak = (text: string) => {
@@ -58,6 +58,15 @@ const getRelativeTime = (dateStr: string) => {
         return "";
     }
 }
+
+const formatDateTime = (isoString: string) => {
+  try {
+    const date = new Date(isoString);
+    return date.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+  } catch {
+    return isoString;
+  }
+};
 
 // --- VIEW COMPONENTS ---
 
@@ -278,6 +287,61 @@ export const AppointmentsView = ({ onClose, appointments, onAdd, onDelete }: { o
         </div>
     );
 };
+
+export const DiaperLogView = ({ onClose, diaperLog, onAdd, onDelete }: { onClose: () => void, diaperLog: DiaperLogEntry[], onAdd: (status: DiaperLogEntry['status']) => void, onDelete: (id: number) => void }) => {
+  const [status, setStatus] = useState<DiaperLogEntry['status']>('wet');
+
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-950 flex flex-col items-center p-6 animate-in fade-in duration-500 overflow-y-auto">
+      <div className="w-full max-w-lg flex items-center justify-between mb-6">
+        <h2 className="text-2xl font-bold text-white flex items-center gap-2"><ScrollText className="text-pink-400"/> Diaper Log</h2>
+        <Button variant="ghost" onClick={onClose}><XCircle /> Close</Button>
+      </div>
+
+      <Card className="max-w-lg w-full border-pink-500/30 bg-slate-900 mb-6">
+        <h3 className="text-pink-200 font-bold mb-4 flex items-center gap-2"><ClipboardList size={18} /> Log New Change</h3>
+        <div className="flex flex-col gap-3">
+          <div className="flex gap-2">
+            <Button 
+              variant={status === 'wet' ? 'water' : 'ghost'} 
+              onClick={() => setStatus('wet')} 
+              className="flex-1"
+            >
+              Wet
+            </Button>
+            <Button 
+              variant={status === 'soiled' ? 'food' : 'ghost'} 
+              onClick={() => setStatus('soiled')} 
+              className="flex-1"
+            >
+              Soiled
+            </Button>
+            <Button 
+              variant={status === 'mixed' ? 'primary' : 'ghost'} 
+              onClick={() => setStatus('mixed')} 
+              className="flex-1"
+            >
+              Mixed
+            </Button>
+          </div>
+          <Button onClick={() => { onAdd(status); }} variant="primary" className="w-full"><Save size={18} /> Record Change</Button>
+        </div>
+      </Card>
+
+      <div className="w-full max-w-lg space-y-3 pb-8">
+        {diaperLog.length === 0 && <p className="text-slate-500 text-center italic">No diaper entries yet. Let's log your first one!</p>}
+        {diaperLog.map((entry) => (
+          <div key={entry.id} className="bg-slate-800/50 border border-slate-700 p-4 rounded-xl relative group transition-all hover:border-slate-600">
+            <p className="text-xs text-pink-300 font-bold mb-1">{formatDateTime(entry.timestamp)}</p>
+            <p className="text-slate-200 capitalize">Status: <Badge className={`${entry.status === 'wet' ? 'bg-cyan-500/20 text-cyan-300' : entry.status === 'soiled' ? 'bg-amber-500/20 text-amber-300' : 'bg-pink-500/20 text-pink-300'}`}>{entry.status}</Badge></p>
+            <button onClick={() => onDelete(entry.id)} className="absolute top-2 right-2 text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity p-2"><Trash2 size={16} /></button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 
 export const WatchView = ({ onClose, tasks, toggleTask, minsSinceCheck, currentTime, formatTime }: { onClose: () => void, tasks: Task[], toggleTask: (id: number) => void, minsSinceCheck: number, currentTime: Date, formatTime: (d: Date) => string }) => {
     const nextTask = tasks.find(t => !t.completed);

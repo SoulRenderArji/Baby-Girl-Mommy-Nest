@@ -3,7 +3,7 @@ import { XCircle } from 'lucide-react';
 
 // --- BUTTON ---
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: 'primary' | 'secondary' | 'check' | 'food' | 'water' | 'comfort' | 'tapo' | 'medical' | 'rules' | 'walk' | 'google' | 'ghost' | 'sos';
+  variant?: 'primary' | 'secondary' | 'check' | 'food' | 'water' | 'comfort' | 'tapo' | 'medical' | 'rules' | 'walk' | 'google' | 'ghost' | 'sos' | 'hygiene';
   size?: 'sm' | 'md' | 'lg' | 'icon';
 }
 
@@ -24,6 +24,7 @@ export const Button: React.FC<ButtonProps> = ({ onClick, variant = 'primary', cl
     google: "bg-blue-600 text-white hover:bg-blue-500 border-b-4 border-blue-800 active:border-b-0 active:translate-y-1 focus:ring-blue-500",
     ghost: "bg-slate-800/50 text-pink-300 hover:bg-slate-700/50 shadow-none border-transparent",
     sos: "bg-gradient-to-r from-rose-500 to-pink-600 text-white hover:from-rose-400 hover:to-pink-500 border-b-4 border-rose-800 active:border-b-0 active:translate-y-1 shadow-rose-900/50",
+    hygiene: "bg-pink-600 text-white hover:bg-pink-500 border-b-4 border-pink-800 active:border-b-0 active:translate-y-1 focus:ring-pink-600",
   };
   
   const sizes = { sm: "px-3 py-2 text-sm", md: "px-4 py-4 text-base", lg: "px-6 py-6 text-xl", icon: "p-3" };
@@ -83,14 +84,16 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
   }
 
   public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.error("Crash Report:", error, errorInfo);
-    // Fix: Using this.setState inherited from Component
+    console.error("MommySync Crash Report:", error, errorInfo);
     this.setState({ errorInfo });
   }
 
   private handleReset = () => {
-    localStorage.clear();
-    // Fix: Using this.setState inherited from Component
+    localStorage.removeItem('geminiCareTasks');
+    localStorage.removeItem('geminiCareRules');
+    localStorage.removeItem('geminiCareJournal');
+    localStorage.removeItem('geminiCareAppts');
+    localStorage.removeItem('geminiCareDiaperLog'); // Clear diaper log on reset
     this.setState({ hasError: false });
     window.location.reload();
   }
@@ -112,7 +115,6 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
         </div>
       );
     }
-    // Fix: Using this.props inherited from Component
     return this.props.children;
   }
 }
